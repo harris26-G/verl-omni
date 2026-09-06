@@ -31,7 +31,7 @@ from verl_omni.pipelines.model_base import OmniModelBase
 logger = logging.getLogger(__name__)
 
 
-def _collapse_interleaved_audio_video_tokens(prompt_ids: list[int], tokenizer) -> list[int]:
+def _collapse_interleaved_audio_video_tokens(prompt_ids: list[int], processor) -> list[int]:
     """Restore each complete HF audio-in-video span to one raw video placeholder.
 
     vLLM-Omni re-expands the video placeholder into both modalities. Merely
@@ -39,8 +39,24 @@ def _collapse_interleaved_audio_video_tokens(prompt_ids: list[int], tokenizer) -
     the prompt. Only recognize complete spans containing both pad types and
     no text; ordinary audio, video, and surrounding conversation stay intact.
     """
-    token_names = ("vision_start", "audio_start", "video_pad", "audio_pad", "audio_end", "vision_end")
-    ids = [tokenizer.convert_tokens_to_ids(f"<|{name}|>") for name in token_names]
+    tokenizer = getattr(processor, "tokenizer", None)
+    if tokenizer is None:
+        return prompt_ids
+    token_attrs = (
+        "vision_bos_token",
+        "audio_bos_token",
+        "video_token",
+        "audio_token",
+        "audio_eos_token",
+        "vision_eos_token",
+    )
+    tokens = [getattr(processor, attr, None) for attr in token_attrs]
+    if any(token is None for token in tokens):
+        return prompt_ids
+    try:
+        ids = [tokenizer.convert_tokens_to_ids(token) for token in tokens]
+    except (TypeError, ValueError):
+        return prompt_ids
     if any(tid is None or tid == getattr(tokenizer, "unk_token_id", None) for tid in ids):
         return prompt_ids
     if len(set(ids)) != len(ids):
@@ -112,6 +128,11 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
 
         Returns:
             The configured processor with RoPE and dedup helpers bound.
+
+        Note:
+            Interleaved audio-video normalization is installed on this V1
+            adapter path only. The deprecated ``models.transformers.
+            qwen3_omni_thinker`` hf_processor fallback is unchanged.
         """
         import types
 
@@ -151,7 +172,7 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
             tokenizer = getattr(self, "tokenizer", None)
             if tokenizer is None:
                 return prompt_ids
-            prompt_ids = _collapse_interleaved_audio_video_tokens(prompt_ids, tokenizer)
+            prompt_ids = _collapse_interleaved_audio_video_tokens(prompt_ids, self)
             pad_ids: set[int] = set()
             for tok_attr in ("image_token", "video_token", "audio_token"):
                 tok = getattr(self, tok_attr, None)

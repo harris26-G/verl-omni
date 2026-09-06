@@ -15,12 +15,23 @@ import pytest
 
 from verl_omni.pipelines.qwen3_omni.thinker_training_adapter import _collapse_interleaved_audio_video_tokens
 
+TOKEN_ATTRS = (
+    "vision_bos_token",
+    "audio_bos_token",
+    "video_token",
+    "audio_token",
+    "audio_eos_token",
+    "vision_eos_token",
+)
 
-def tokenizer(**overrides):
-    names = ("vision_start", "audio_start", "video_pad", "audio_pad", "audio_end", "vision_end")
-    mapping = {f"<|{name}|>": i for i, name in enumerate(names, 101)}
+
+def processor(**overrides):
+    # Deliberately not the default HF strings: the processor owns these names.
+    tokens = {attr: f"custom_{attr}" for attr in TOKEN_ATTRS}
+    mapping = {token: i for i, token in enumerate(tokens.values(), 101)}
     mapping.update(overrides)
-    return SimpleNamespace(unk_token_id=0, convert_tokens_to_ids=lambda tok: mapping.get(tok, 0))
+    tokenizer = SimpleNamespace(unk_token_id=0, convert_tokens_to_ids=lambda tok: mapping.get(tok, 0))
+    return SimpleNamespace(tokenizer=tokenizer, **tokens)
 
 
 SPAN = [101, 102, 103, 103, 104, 104, 103, 104, 105, 106]
@@ -31,15 +42,15 @@ RAW = [101, 103, 106]
 def test_complete_interleaved_span_preserves_surrounding_tokens(prefix, suffix):
     original = prefix + SPAN + suffix
     saved = original.copy()
-    actual = _collapse_interleaved_audio_video_tokens(original, tokenizer())
+    actual = _collapse_interleaved_audio_video_tokens(original, processor())
     assert actual == prefix + RAW + suffix
     assert original == saved
-    assert _collapse_interleaved_audio_video_tokens(actual, tokenizer()) == actual
+    assert _collapse_interleaved_audio_video_tokens(actual, processor()) == actual
 
 
 def test_multiple_media_and_history_keep_order():
     original = [7] + SPAN + [8, 9, 10] + SPAN + [11]
-    assert _collapse_interleaved_audio_video_tokens(original, tokenizer()) == [7] + RAW + [8, 9, 10] + RAW + [11]
+    assert _collapse_interleaved_audio_video_tokens(original, processor()) == [7] + RAW + [8, 9, 10] + RAW + [11]
 
 
 @pytest.mark.parametrize(
@@ -60,9 +71,27 @@ def test_multiple_media_and_history_keep_order():
     ],
 )
 def test_non_interleaved_or_malformed_span_is_unchanged(tokens):
-    assert _collapse_interleaved_audio_video_tokens(tokens, tokenizer()) == tokens
+    assert _collapse_interleaved_audio_video_tokens(tokens, processor()) == tokens
 
 
 @pytest.mark.parametrize("value", [None, 0, 101])
 def test_unknown_or_aliased_special_token_is_unchanged(value):
-    assert _collapse_interleaved_audio_video_tokens(SPAN, tokenizer(**{"<|audio_end|>": value})) == SPAN
+    assert _collapse_interleaved_audio_video_tokens(SPAN, processor(custom_audio_eos_token=value)) == SPAN
+
+
+@pytest.mark.parametrize("attr", ["tokenizer", *TOKEN_ATTRS])
+def test_missing_processor_attribute_is_unchanged(attr):
+    proc = processor()
+    delattr(proc, attr)
+    assert _collapse_interleaved_audio_video_tokens(SPAN, proc) == SPAN
+
+
+@pytest.mark.parametrize("error", [TypeError, ValueError])
+def test_unresolvable_processor_token_is_unchanged(error):
+    proc = processor()
+
+    def convert(token):
+        raise error(token)
+
+    proc.tokenizer.convert_tokens_to_ids = convert
+    assert _collapse_interleaved_audio_video_tokens(SPAN, proc) == SPAN
